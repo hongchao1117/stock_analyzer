@@ -12,7 +12,7 @@ class StockInfo:
     """单只股票的基础信息（解析后）."""
 
     input_symbol: str          # 用户输入的原始代码，如 "513100"
-    normalized_symbol: str     # yfinance 标准格式，如 "513100.SS"
+    normalized_symbol: str     # 标准格式（新浪兼容），如 "513100.SS"
     market: str                # "CN" | "US" | "HK"
     name: str | None = None    # 从行情数据获取的名称（解析时未知）
     components: list[str] = field(default_factory=list)  # 主要成分股（ETF时使用）
@@ -83,7 +83,7 @@ class DailyBriefing:
 
     date: str
     disclaimer: str
-    data_status: str           # "live" | "mock" | "partial"
+    data_status: str           # "live" | "partial" | "error"
     data_status_label: str     # 人类可读标签
     snapshots: list[MarketSnapshot] = field(default_factory=list)
     news_items: list[NewsItem] = field(default_factory=list)
@@ -124,3 +124,17 @@ MARKET_LABELS: dict[str, str] = {
     "US": "美股",
     "HK": "港股",
 }
+
+
+@dataclass
+class AgentState:
+    """Agent 运行时状态 — 追踪 ReAct 循环中的 step、观察记录、工具调用日志."""
+
+    step: int = 0
+    observations: list[str] = field(default_factory=list)  # 每轮 tool 返回的观察
+    tool_log: list[dict[str, Any]] = field(default_factory=list)  # {step, tool, args, result_summary}
+    stocks: list[StockInfo] = field(default_factory=list)
+    snapshots: list[MarketSnapshot | None] = field(default_factory=list)
+    news_items: list[NewsItem] = field(default_factory=list)  # 工具直接填充
+    advice_data: dict[str, dict[str, Any]] = field(default_factory=dict)  # symbol → {action, confidence, reasons, risk_note}
+    submitted: bool = False  # submit_final_report 是否已调用

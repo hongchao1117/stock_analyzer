@@ -25,11 +25,11 @@ MARKET_TIMEZONES: dict[str, str] = {
 }
 
 # ═══════════════════════════════════════════
-# 符号转换: yfinance 格式 → 新浪格式
+# 符号转换: 标准化代码 → 新浪格式
 # ═══════════════════════════════════════════
 
 def _to_sina_symbol(normalized: str, market: str) -> str:
-    """yfinance 标准化代码 → 新浪代码."""
+    """标准化代码 → 新浪代码."""
     if market == "CN":
         if normalized.endswith(".SS"):
             return f"sh{normalized.replace('.SS', '')}"

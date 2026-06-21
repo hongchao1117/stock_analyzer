@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -26,17 +27,14 @@ if sys.platform == "win32":
         pass
 
 from symbol_parser import parse_symbols
-from models import DailyBriefing, StockInfo, MarketSnapshot, NewsItem, StockAdvice
-from data.fetcher import fetch_all as fetch_market, all_failed
-from llm import analyze as llm_analyze
+from models import DailyBriefing
+from agent import run_agent
 from output.reporter import render
 
 logger = logging.getLogger(__name__)
 
 # 项目根目录（无论从哪里执行，输出路径始终固定）
 PROJECT_DIR = Path(__file__).resolve().parent
-
-PRESET_THEMES = ["AI产业链", "新能源", "半导体", "消费", "互联网", "医药"]
 
 # API Key 持久化文件
 _KEY_FILE = PROJECT_DIR / ".deepseek_key"
@@ -85,7 +83,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--theme", "-t", default=None,
-        help=f"关注主题，预置: {', '.join(PRESET_THEMES)}。也支持自定义。",
+        help="关注方向，自由文本（如 'AI芯片'、'消费复苏'）",
     )
     parser.add_argument(
         "--api-key", default=None,
@@ -120,28 +118,36 @@ def _interactive_input() -> tuple[list[str], str | None]:
     print()
     print("╔══════════════════════════════════════════════╗")
     print("║       📊 Stock Analyzer — 股票分析器         ║")
-    print("║       DeepSeek AI 驱动 · 真实行情             ║")
+    print("║       🤖 AI Agent 驱动 · 真实行情             ║")
     print("╚══════════════════════════════════════════════╝")
     print()
-    print("支持: A股(600519)  美股(AAPL)  港股(0700/0700.HK)")
-    print("多只用空格分隔: 600519 AAPL 0700.HK")
-    print(f"预置主题: {', '.join(PRESET_THEMES)}")
+    print("支持两种输入方式:")
+    print("  代码: 600519 AAPL 0700.HK SOXL")
+    print("  自然语言: 我持仓纳指科技ETF、中韩半导体ETF，还有美股SOXL")
     print()
 
     while True:
         try:
-            raw = input("👉 股票代码: ").strip()
+            raw = input("👉 股票代码或描述: ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\n已取消。")
             sys.exit(0)
         if raw:
-            symbols = [s.strip() for s in raw.split() if s.strip()]
-            if symbols:
-                break
-        print("⚠️  请输入至少一个股票代码。")
+            break
+        print("⚠️  请输入股票代码或描述。")
+
+    # 智能判断：是纯代码列表还是自然语言
+    # 纯代码: 只包含字母数字和点，空格分隔
+    tokens = raw.split()
+    is_pure_codes = all(re.match(r'^[a-zA-Z0-9.]+$', t) for t in tokens)
+    if is_pure_codes:
+        symbols = tokens
+    else:
+        # 自然语言 → 整个字符串传给 Agent，由 parse_portfolio 工具处理
+        symbols = [raw]
 
     try:
-        theme = input("👉 关注主题（回车跳过）: ").strip()
+        theme = input("👉 关注方向（如 AI芯片、消费复苏，回车跳过）: ").strip()
     except (EOFError, KeyboardInterrupt):
         theme = None
     if not theme:
@@ -151,7 +157,7 @@ def _interactive_input() -> tuple[list[str], str | None]:
 
 
 # ═══════════════════════════════════════════════
-# Pipeline
+# Agent 分析入口
 # ═══════════════════════════════════════════════
 
 def run_pipeline(
@@ -162,78 +168,51 @@ def run_pipeline(
     output_formats: list[str] | None = None,
     verbose: bool = False,
 ) -> DailyBriefing:
-    """执行完整分析流水线."""
+    """执行 AI Agent 分析流水线.
+
+    Agent 自主决定:
+      - 何时获取行情数据
+      - 从什么角度分析新闻
+      - 是否需要深入挖掘
+      - 何时提交最终报告
+    """
     if output_formats is None:
         output_formats = ["terminal", "markdown"]
 
     date_str = datetime.now().strftime("%Y-%m-%d")
     errors: list[str] = []
 
-    # ═══ Step 1: 解析代码 ═══
-    stocks, parse_errors = parse_symbols(raw_symbols)
-    errors.extend(parse_errors)
-    if not stocks:
-        return DailyBriefing(
-            date=date_str,
-            disclaimer="本报告由AI生成，仅供参考，不构成投资建议。",
-            data_status="error",
-            data_status_label="全部代码解析失败",
-            errors=errors,
-        )
-    logger.info("解析成功 %d 只: %s", len(stocks), [s.normalized_symbol for s in stocks])
-
-    # ═══ Step 2: 获取行情（新浪财经） ═══
-    logger.info("获取实时行情...")
-    snapshots = fetch_market(stocks)
-
-    failed_snapshots = sum(1 for s in snapshots if s is None)
-    snapshots_clean: list[MarketSnapshot | None] = snapshots
-
-    if all_failed(snapshots):
-        errors.append("所有股票行情获取失败，请检查网络连接")
-        return DailyBriefing(
-            date=date_str,
-            disclaimer="本报告由AI生成，仅供参考，不构成投资建议。",
-            data_status="error",
-            data_status_label="行情获取失败",
-            errors=errors,
-        )
-
-    data_status = "live"
-    data_status_label = "实时数据 · 新浪财经"
-    if failed_snapshots > 0:
-        data_status = "partial"
-        data_status_label = f"实时数据 · 新浪财经（{failed_snapshots}只失败）"
-
-    # 给没有名称的股票补充名称
-    for i, stock in enumerate(stocks):
-        snap = snapshots[i] if i < len(snapshots) else None
-        if snap and snap.name == snap.symbol and stock.name:
-            snap.name = stock.name
-
-    logger.info("行情获取完成: %d 成功, %d 失败",
-                len(stocks) - failed_snapshots, failed_snapshots)
-
-    # ═══ Step 3: DeepSeek LLM 分析 ═══
-    logger.info("调用 DeepSeek 分析...")
-    news_items, advice, llm_error = llm_analyze(stocks, snapshots_clean, theme, api_key)
-
-    if llm_error:
-        errors.append(llm_error)
-
-    # ═══ Step 4: 组装简报 ═══
-    briefing = DailyBriefing(
-        date=date_str,
-        disclaimer="⚠️ 本报告由 DeepSeek AI 生成，仅供参考，不构成投资建议。投资有风险，决策需谨慎。",
-        data_status=data_status,
-        data_status_label=data_status_label,
-        snapshots=[s for s in snapshots_clean if s is not None],
-        news_items=news_items,
-        advice=advice,
-        dropped_news=[{"reason": e} for e in errors],
-        errors=errors,
-        theme=theme,
+    # ═══ Step 1: 判断输入类型 ═══
+    # 纯代码 → 先解析校验；自然语言 → 直接交给 Agent
+    parse_errors: list[str] = []
+    is_natural = any(
+        not re.match(r'^[a-zA-Z0-9.]+$', s)
+        for s in raw_symbols
     )
+    if not is_natural:
+        stocks, parse_errors = parse_symbols(raw_symbols)
+        errors.extend(parse_errors)
+        if not stocks:
+            return DailyBriefing(
+                date=date_str,
+                disclaimer="本报告由AI生成，仅供参考，不构成投资建议。",
+                data_status="error",
+                data_status_label="全部代码解析失败",
+                errors=errors,
+            )
+
+    # ═══ Step 2-4: Agent 自主分析 ═══
+    logger.info("🤖 启动 AI Agent 分析 %d 个输入...", len(raw_symbols))
+    briefing = run_agent(
+        raw_symbols=raw_symbols,
+        theme=theme,
+        api_key=api_key,
+        verbose=verbose,
+    )
+
+    # 补充解析错误
+    if parse_errors:
+        briefing.errors.extend(parse_errors)
 
     # ═══ Step 5: 渲染输出 ═══
     results = render(briefing, output_dir=output_dir, formats=output_formats, verbose=verbose)

@@ -1,4 +1,4 @@
-"""股票代码解析器 — 识别市场、标准化 yfinance 格式.
+"""股票代码解析器 — 识别市场、标准化代码格式（新浪财经兼容）.
 
 支持格式:
   A股: 600519, 000001, 300750, 688981 (纯6位数字)
@@ -43,7 +43,7 @@ def parse_symbol(raw: str) -> StockInfo:
         raw: 用户输入的原始代码
 
     Returns:
-        StockInfo，包含市场分类和 yfinance 标准化代码
+        StockInfo，包含市场分类和标准化代码
 
     Raises:
         SymbolParseError: 代码格式无法识别
@@ -67,7 +67,7 @@ def parse_symbol(raw: str) -> StockInfo:
                 market="HK",
             )
         elif suffix in ("SS", "SH"):
-            # .SH → 统一转为 .SS (yfinance 用 .SS)
+            # .SH → 统一转为 .SS (新浪/标准格式)
             return StockInfo(
                 input_symbol=raw,
                 normalized_symbol=f"{code}.SS",
